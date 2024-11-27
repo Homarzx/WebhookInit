@@ -193,32 +193,7 @@ app.post('/webhook', function(req, res) {
     return res.status(401).send('FORBIDDEN');
 });
 
-app.post('/createCustomer', urlencodedParser, function(req, res) {
-
-    var token = JSON.parse(token_json);
-
-    // save the access token somewhere on behalf of the logged in user
-    var qbo = new QuickBooks(config.clientId,
-        config.clientSecret,
-        token.access_token, /* oAuth access token */
-        false, /* no token secret for oAuth 2.0 */
-        realmId,
-        true, /* use a sandbox account */
-        true, /* turn debugging on */
-        4, /* minor version */
-        '2.0', /* oauth version */
-        token.refresh_token /* refresh token */);
-
-    qbo.createCustomer({DisplayName: req.body.displayName}, function(err, customer) {
-        if (err) console.log(err)
-        else console.log("The response is :" + JSON.stringify(customer,null,2));
-        res.send(customer   );
-    });
-
-});
-
-
 // Start server on HTTP (will use ngrok for HTTPS forwarding)
-app.listen(8000, function () {
-    console.log('Example app listening on port 8000!')
+app.listen(3000, function () {
+    console.log('Example app listening on port 3000!')
 })
