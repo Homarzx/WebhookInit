@@ -1,199 +1,83 @@
 require('dotenv').config();
-var https = require('https');
-var express = require('express');
-var session = require('express-session');
-var request = require('request');
-var app = express();
-var config = require('./config.json');
-var path = require('path');
-var crypto = require('crypto');
-var QuickBooks = require('node-quickbooks');
-var queryString = require('query-string');
-var fs = require('fs');
-var json2csv = require('json2csv');
-var Tokens = require('csrf');
-var csrf = new Tokens();
+const express = require('express');
+const session = require('express-session');
+const bodyParser = require('body-parser');
+const queryString = require('query-string');
+const auth = require('./auth');
+const config = require('./config.json');
 
-// Configure View and Handlebars
-app.use(express.static(path.join(__dirname, '')))
-app.set('views', path.join(__dirname, 'views'))
-var exphbs = require('express-handlebars');
-var hbs = exphbs.create({});
-app.engine('handlebars', hbs.engine);
-app.set('view engine', 'handlebars');
-app.use(session({secret: 'secret', resave: 'false', saveUninitialized: 'false'}))
-
-/*
-Create body parsers for application/json and application/x-www-form-urlencoded
- */
-var bodyParser = require('body-parser')
-app.use(bodyParser.json())
-var urlencodedParser = bodyParser.urlencoded({ extended: false })
-
-/*
-App Variables
- */
-var token_json,realmId,payload;
-var fields = ['realmId', 'name', 'id', 'operation', 'lastUpdated'];
-var newLine= "\r\n";
+const app = express();
+const port = 3000;
+const { registerRealmToken, doesRealmExist, registerRealmData } = require('./dbService'); // Importar funciones del servicio
 
 
-app.use(express.static('views'));
+// Configuración de vistas y middlewares
+app.use(bodyParser.json());
+app.use(bodyParser.urlencoded({ extended: false }));
+app.use(session({ secret: 'secret', resave: false, saveUninitialized: false }));
 
-app.get('/', function(req, res) {
-
-    //write the headers and newline
-    fields= (fields + newLine);
-
-    fs.writeFile('file.csv', fields, function (err, stat) {
-        if (err) throw err;
-        console.log('file saved');
-    });
-
-    // Render home page with params
-    res.render('index', {
-        redirect_uri: config.redirectUri,
-        token_json: token_json,
-        webhook_uri: config.webhookUri,
-        webhook_payload: payload
-    });
+// Ruta principal
+app.get('/', (req, res) => {
+  res.send('Bienvenido. Usa /auth para autenticarte.');
 });
 
-app.get('/authUri', function(req,res) {
+// Ruta para obtener la URI de autorización
+app.get('/auth', (req, res) => {
+    try {
+      const authUri = auth.getAuthUri(); // Obtiene la URL de autorización
+      res.redirect(authUri); // Redirige al usuario a la página de autorización de Intuit
+    } catch (error) {
+      console.error('Error generando la URL de autorización:', error);
+      res.status(500).send('Error generando la URL de autorización.');
+    }
+  });
 
-    /*
-    Generate csrf Anti Forgery
-     */
-    req.session.secret = csrf.secretSync();
-    var state = csrf.create(req.session.secret);
+// Ruta de callback para manejar el código de autorización
+app.get('/callback', async (req, res) => {
+    try {
+      if (!req.query.code) {
+        return res.status(400).send('Código de autorización no proporcionado.');
+      }
+  
+      const parseRedirect = `${req.protocol}://${req.get('host')}${req.originalUrl}`;
+      const realm = req.query.realmId;
+      const tokens = await auth.createToken(parseRedirect); // Genera los tokens
+      req.session.tokens = tokens; // Guarda los tokens en la sesión del usuario
+      registerRealmToken(realm,tokens.access_token,tokens.refresh_token);
+      res.send('Autenticación exitosa. Puedes cerrar esta ventana.');
+    } catch (error) {
+      console.error('Error durante el callback:', error);
+      res.status(500).send('Error manejando el callback de autorización.');
+    }
+  });
 
-    /*
-    Generate the AuthUrl
-     */
-    var redirecturl = config.authorization_endpoint +
-        '?client_id=' + config.clientId +
-        '&redirect_uri=' + encodeURIComponent(config.redirectUri) +  //Make sure this path matches entry in application dashboard
-        '&scope='+ config.scopes.connect_to_quickbooks[0] +
-        '&response_type=code' +
-        '&state=' + state;
-
-    res.send(redirecturl);
-
-});
-
-app.get('/callback', function(req, res) {
-
-    var parsedUri = queryString.parse(req.originalUrl);
-    realmId = parsedUri.realmId;
-
-    var auth = (new Buffer(config.clientId + ':' + config.clientSecret).toString('base64'));
-    var postBody = {
-        url: config.token_endpoint,
-        headers: {
-            Accept: 'application/json',
-            'Content-Type': 'application/x-www-form-urlencoded',
-            Authorization: 'Basic ' + auth,
-        },
-        form: {
-            grant_type: 'authorization_code',
-            code: req.query.code,
-            redirect_uri: config.redirectUri
+// Ruta para procesar las notificaciones webhook
+  app.post('/webhook', async (req, res) => {
+    const notifications = req.body.eventNotifications;
+  
+    if (!notifications || notifications.length === 0) {
+      return res.status(200).send('No hay notificaciones.');
+    }
+  
+    try {
+      for (const notification of notifications) {
+        const entities = notification.dataChangeEvent.entities;
+        const realm = notification.realmId;
+        for (const entity of entities) {
+          console.log(realm);
+          if(doesRealmExist(realm)){
+            registerRealmData(realm,entity.name,entity.operation,entity.id)
+          }
         }
-    };
+      }
+      res.status(200).send('Notificaciones procesadas.');
+    } catch (error) {
+      console.error('Error procesando webhook:', error);
+      res.status(500).send('Error procesando webhook.');
+    }
+  }); 
 
-    request.post(postBody, function (err, res, data) {
-        var accessToken = JSON.parse(res.body);
-        token_json = JSON.stringify(accessToken, null,2);
-    });
-    res.send('');
-
+// Iniciar el servidor
+app.listen(port, () => {
+  console.log(`Servidor corriendo en http://localhost:${port}`);
 });
-
-app.post('/payload',function (req,res) {
-
-
-  console.log("The Webhook notification payload is :" + JSON.stringify(req.body));
-  res.sendStatus(200);
-
-})
-
-app.post('/webhook', function(req, res) {
-
-    var webhookPayload = JSON.stringify(req.body);
-    console.log('The paylopad is :' + JSON.stringify(req.body));
-    var signature = req.get('intuit-signature');
-
-    var fields = ['realmId', 'name', 'id', 'operation', 'lastUpdated'];
-    var newLine= "\r\n";
-
-    // if signature is empty return 401
-    if (!signature) {
-        return res.status(401).send('FORBIDDEN');
-    }
-
-    // if payload is empty, don't do anything
-    if (!webhookPayload) {
-        return res.status(200).send('success');
-    }
-
-    /**
-     * Validates the payload with the intuit-signature hash
-     */
-    var hash = crypto.createHmac('sha256', config.webhooksVerifier).update(webhookPayload).digest('base64');
-    if (signature === hash) {
-        console.log("The Webhook notification payload is :" + webhookPayload);
-
-        /**
-         * Write the notification to CSV file
-         */
-        var appendThis = [];
-        for(var i=0; i < req.body.eventNotifications.length; i++) {
-            var entities = req.body.eventNotifications[i].dataChangeEvent.entities;
-            var realmID = req.body.eventNotifications[i].realmId;
-            for(var j=0; j < entities.length; j++) {
-                var notification = {
-                    'realmId': realmID,
-                    'name': entities[i].name,
-                    'id': entities[i].id,
-                    'operation': entities[i].operation,
-                    'lastUpdated': entities[i].lastUpdated
-                }
-                appendThis.push(notification);
-            }
-        }
-
-        var toCsv = {
-            data: appendThis,
-            fields: fields
-        };
-
-        fs.stat('file.csv', function (err, stat) {
-            if (err == null) {
-                //write the actual data and end with newline
-                var csv = json2csv(toCsv) + newLine;
-
-                fs.appendFile('file.csv', csv, function (err) {
-                    if (err) throw err;
-                    console.log('The "data to append" was appended to file!');
-                });
-            }
-            else {
-                //write the headers and newline
-                console.log('New file, just writing headers');
-                fields= (fields + newLine);
-
-                fs.writeFile('file.csv', fields, function (err, stat) {
-                    if (err) throw err;
-                    console.log('file saved');
-                });
-            }
-        });
-        return res.status(200).send('SUCCESS');
-    }
-    return res.status(401).send('FORBIDDEN');
-});
-
-// Start server on HTTP (will use ngrok for HTTPS forwarding)
-app.listen(3000, function () {
-    console.log('Example app listening on port 3000!')
-})
